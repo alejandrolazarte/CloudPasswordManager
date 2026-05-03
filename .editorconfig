@@ -1,0 +1,32 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+
+[*.cs]
+indent_style = space
+indent_size = 4
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_indent_case_contents = true
+csharp_indent_switch_labels = true
+csharp_space_after_cast = false
+csharp_space_after_keywords_in_control_flow_statements = true
+csharp_prefer_braces = true
+csharp_prefer_simple_using_statement = true
+csharp_style_namespace_declarations = file_scoped
+csharp_style_prefer_primary_constructors = true
+csharp_style_prefer_pattern_matching = true
+csharp_style_prefer_null_check_over_type_check = true
+csharp_style_using_directive_placement = outside_namespace
+csharp_style_var_for_built_in_types = false
+csharp_style_var_elsewhere = false
+csharp_naming_private_field = _camelCase
+csharp_naming_interface = I
+
+[*.{csproj,json}]
+indent_style = space
+indent_size = 2
