@@ -1,15 +1,33 @@
+using System.Security.Cryptography;
+using CloudPasswordManager.Crypto;
+using CloudPasswordManager.Crypto.Models;
+using Shouldly;
 using Xunit;
 
 namespace CloudPasswordManager.Crypto.U.Tests.When_tag_is_modified;
 
 public class Then_Decrypt_throws
 {
-    [Fact(Skip = "not implemented — requires M1 crypto implementation")]
-    public async Task _Run()
+    [Fact]
+    public void _Run()
     {
-        // Arrange: encrypt a valid vault, then flip one byte in Tag
-        // Act: call Decrypt
-        // Assert: throws CryptographicException
-        await Task.CompletedTask;
+        VaultCryptoService.ResetCounterState();
+
+        var service = new VaultCryptoService();
+        var masterPassword = "test password";
+        var secretKey = RandomNumberGenerator.GetBytes(32);
+        var accountSalt = RandomNumberGenerator.GetBytes(32);
+        var accountId = Guid.NewGuid();
+
+        var vault = new PlainVault(1, Guid.NewGuid(), 1, new List<VaultEntry>());
+        var key = service.DeriveUnlockKey(masterPassword, secretKey, accountSalt);
+        var envelope = service.Encrypt(vault, key, accountId, accountSalt);
+
+        var tamperedTag = (byte[])envelope.Tag.Clone();
+        tamperedTag[0] ^= 0xFF;
+
+        var tampered = envelope with { Tag = tamperedTag };
+
+        Should.Throw<AuthenticationTagMismatchException>(() => service.Decrypt(tampered, key));
     }
 }

@@ -1,18 +1,35 @@
+using System.Security.Cryptography;
+using System.Text;
+using CloudPasswordManager.Crypto;
+using Shouldly;
 using Xunit;
 
 namespace CloudPasswordManager.Crypto.U.Tests.When_master_password_has_unicode;
 
 public class Then_key_derivation_is_NFC_normalized
 {
-    [Fact(Skip = "not implemented — requires M1 crypto implementation")]
-    public async Task _Run()
+    [Fact]
+    public void _Run()
     {
-        // Arrange: two strings that are canonically equivalent under Unicode NFC
-        //   e.g. "café" (precomposed) and "café" (decomposed + combining accent)
-        // Act: DeriveUnlockKey with each string (implementation must NFC-normalize before Argon2id)
-        // Assert: both produce identical UnlockKey.Value
-        // Why: iOS and Android may produce different representations of the same password,
-        //      which would make the vault unrecoverable across platforms without normalization.
-        await Task.CompletedTask;
+        VaultCryptoService.ResetCounterState();
+
+        var service = new VaultCryptoService();
+        var secretKey = RandomNumberGenerator.GetBytes(32);
+        var accountSalt = RandomNumberGenerator.GetBytes(32);
+
+        // "café" NFC precomposed: e with acute accent is single codepoint U+00E9
+        var precomposed = "café";
+
+        // "café" NFD decomposed: e followed by combining acute accent U+0065 U+0301
+        var decomposed = "caf\u0065\u0301";
+
+        // Verify they are canonically equivalent
+        precomposed.Normalize(NormalizationForm.FormC).ShouldBe(
+            decomposed.Normalize(NormalizationForm.FormC));
+
+        var keyPrecomposed = service.DeriveUnlockKey(precomposed, secretKey, accountSalt);
+        var keyDecomposed = service.DeriveUnlockKey(decomposed, secretKey, accountSalt);
+
+        keyPrecomposed.Value.ShouldBe(keyDecomposed.Value);
     }
 }
