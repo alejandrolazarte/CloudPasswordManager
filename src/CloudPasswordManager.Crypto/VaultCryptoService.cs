@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -15,17 +14,26 @@ public sealed class VaultCryptoService : IVaultCryptoService
     private const string AlgorithmAes256Gcm = "AES-256-GCM";
     private const string KdfArgon2idV1 = "argon2id-v1";
 
+    private readonly INonceCounterStore nonceCounterStore;
+
     private static readonly byte[] VaultContentKeyInfo =
         Encoding.UTF8.GetBytes("vault_content_key");
-
-    private static readonly ConcurrentDictionary<string, ulong> NextCounters = new();
-    private static readonly ConcurrentDictionary<string, HashSet<ulong>> UsedCounters = new();
 
     private static readonly JsonSerializerOptions VaultJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false
     };
+
+    public VaultCryptoService()
+        : this(new InMemoryNonceCounterStore())
+    {
+    }
+
+    public VaultCryptoService(INonceCounterStore nonceCounterStore)
+    {
+        this.nonceCounterStore = nonceCounterStore;
+    }
 
     public UnlockKey DeriveUnlockKey(string masterPassword, byte[] secretKey, byte[] accountSalt)
     {
@@ -39,18 +47,22 @@ public sealed class VaultCryptoService : IVaultCryptoService
 
     public VaultEnvelope Encrypt(PlainVault vault, UnlockKey key, Guid accountId, byte[] accountSalt)
     {
-        ulong counter = ReserveMonotonicCounterAndRejectIfReused(key.Value);
-        byte[] nonce = BuildNonceWithRandomPrefixAndCounter(counter);
+        NonceReservation nonceReservation = nonceCounterStore.ReserveNext(key.Value, vault.VaultId);
+        byte[] nonce = BuildNonceWithDevicePrefixAndCounter(nonceReservation);
         byte[] plaintext = SerializeVaultToUtf8Json(vault);
-        string aad = BuildAadWithCanonicalJsonBinding(vault, accountId, counter);
+        string aad = BuildAadWithCanonicalJsonBinding(vault, accountId, nonceReservation.EncryptionCounter);
         (byte[] ciphertext, byte[] tag) = EncryptWithAes256Gcm(key.Value, nonce, plaintext, aad);
-        return PackageEnvelope(vault.VaultId, vault.Version, accountId, counter, nonce, ciphertext, tag, aad);
+        WipeFromMemory(plaintext);
+        return PackageEnvelope(vault.VaultId, vault.Version, accountId,
+            nonceReservation.EncryptionCounter, nonce, ciphertext, tag, aad);
     }
 
     public PlainVault Decrypt(VaultEnvelope envelope, UnlockKey key)
     {
         byte[] plaintext = DecryptWithAes256GcmAndThrowIfTampered(key.Value, envelope);
-        return DeserializeVaultFromUtf8Json(plaintext);
+        PlainVault vault = DeserializeVaultFromUtf8Json(plaintext);
+        WipeFromMemory(plaintext);
+        return vault;
     }
 
     private static byte[] NfcNormalizeToUtf8(string masterPassword)
@@ -93,36 +105,18 @@ public sealed class VaultCryptoService : IVaultCryptoService
         }
     }
 
-    /// <summary>
-    /// Claims the next monotonic counter for this key and throws if it was already used.
-    /// AES-GCM nonce reuse with the same key is catastrophic — this is the last line of defense.
-    /// </summary>
-    private static ulong ReserveMonotonicCounterAndRejectIfReused(byte[] key)
+    private static byte[] BuildNonceWithDevicePrefixAndCounter(NonceReservation reservation)
     {
-        string keyId = Convert.ToBase64String(key);
-        ulong counter = NextCounters.AddOrUpdate(keyId, 1, (_, n) => n + 1) - 1;
-
-        var used = UsedCounters.GetOrAdd(keyId, _ => new HashSet<ulong>());
-        lock (used)
-        {
-            if (!used.Add(counter))
-            {
-                throw new InvalidOperationException(
-                    $"Counter {counter} already used with this key. Nonce reuse prevented.");
-            }
-        }
-
-        return counter;
-    }
-
-    private static byte[] BuildNonceWithRandomPrefixAndCounter(ulong counter)
-    {
-        byte[] prefix = RandomNumberGenerator.GetBytes(4);
-        return AppendCounterBigEndian(prefix, counter);
+        return AppendCounterBigEndian(reservation.DeviceNoncePrefix, reservation.EncryptionCounter);
     }
 
     private static byte[] AppendCounterBigEndian(byte[] prefix, ulong counter)
     {
+        if (prefix.Length != 4)
+        {
+            throw new ArgumentException("AES-GCM nonce prefix must be exactly 4 bytes.", nameof(prefix));
+        }
+
         byte[] nonce = new byte[12];
         Buffer.BlockCopy(prefix, 0, nonce, 0, 4);
         for (int i = 0; i < 8; i++)
@@ -185,6 +179,7 @@ public sealed class VaultCryptoService : IVaultCryptoService
         byte[] aadBytes = Encoding.UTF8.GetBytes(aad);
         using var aesGcm = new AesGcm(key, 16);
         aesGcm.Encrypt(nonce, plaintext, ciphertext, tag, aadBytes);
+        WipeFromMemory(aadBytes);
         return (ciphertext, tag);
     }
 
@@ -194,6 +189,7 @@ public sealed class VaultCryptoService : IVaultCryptoService
         byte[] plaintext = new byte[envelope.Ciphertext.Length];
         using var aesGcm = new AesGcm(key, 16);
         aesGcm.Decrypt(envelope.Nonce, envelope.Ciphertext, envelope.Tag, plaintext, aadBytes);
+        WipeFromMemory(aadBytes);
         return plaintext;
     }
 
@@ -230,19 +226,8 @@ public sealed class VaultCryptoService : IVaultCryptoService
         }
     }
 
-    internal static void MarkCounterUsed(byte[] key, ulong counter)
-    {
-        string keyId = Convert.ToBase64String(key);
-        var used = UsedCounters.GetOrAdd(keyId, _ => new HashSet<ulong>());
-        lock (used)
-        {
-            used.Add(counter);
-        }
-    }
-
     internal static void ResetCounterState()
     {
-        NextCounters.Clear();
-        UsedCounters.Clear();
+        InMemoryNonceCounterStore.Reset();
     }
 }
